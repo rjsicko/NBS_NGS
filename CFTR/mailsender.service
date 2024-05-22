@@ -1,0 +1,10 @@
+[Unit]
+Description=mailsender
+
+[Service]
+Type=simple
+StandardOutput=journal
+ExecStart=/opt/nys_nbs/mailsender.sh
+
+[Install]
+WantedBy=default.target
