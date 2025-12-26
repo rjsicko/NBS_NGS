@@ -13,7 +13,7 @@
 #                   - log_step - stopped emailing entire log and only current warning/error.
 #                   - find_project_name - added ability to extract project name from 'Experiment Name' in SampleSheet.csv
 #
-#            v1.0.2 - rename project directory 1 day after archer.done file created, but ignore projects older than 5 days.
+#            v1.0.2 - rename project directory 1 day after archerv7.done file created, but ignore projects older than 5 days.
 #            v1.0.3 - changed the loop in run_ready_demultiplex to a for loop with max runs of 7 to prevent new hourly cron call from processing same run as a sleeping script
 #            v1.0.4 - added the check for projects in incorrect directory. lines 289 - 310
 #                   - parse the "Archer-YYYY-DDD" format in the 'Experiment Name' field of SampleSheet.csv lines 210 - 216
@@ -23,18 +23,39 @@
 #                                     then insert "flock -x -n /home/srvArcherNBS/temp/archer_process_miseq_run.lock -c" after "@hourly"
 #                               - reverted to 1.0.2 version of the loop in run_ready_demultiplex.
 #                   - ignore archived runs to avoid spamming the log file (if [[ -f "${proj}/project-archived-on-agtcnbs_archive" ]]; then)
+#             alpha_for_v7 - testing for v7 server
+#                           - updated mount locations to match v7 server
+#                           - script uses REST API and python script to submit job instead of watched folder
+#             v2.0.0-alpha1 - versioning for migration to v7 server
+#             v2.0.0        - uncommented lines since we switch (rename run folder)
+#                           - removed alpha (production now)
+#             v2.1.0        - fixed bug in rename run folder. uncomment lines.
+# TODO:
+#			- Prevent spamming errors.
+#					- Add a file to a run that indicates an error message has been sent. If file present - no email, just log "error already sent"
+# handle spaces in Experiment Name of sample sheet
+# example: 231023_M70114_0334_000000000-L4B7J
+#           this one broke the code in find_project_name:
+#                              project_name=$(grep -A500 "Sample_Project" "$sample_sheet" | \
+#  tr -d '\r' | \
+#  awk 'BEGIN { NR==1; FS="," } { for (i=1; i<=NF; i++) { f[$i] = i } } { print $(f["Sample_Project"]) }' | \
+#  head -2 | tail -1)
+#
+#     the samplesheet had "Archer 2023-291" as Experiment Name and the code left project_name=291 for some reason.
 #######################################
 #GLOBAL DEFINITIONS
-VERSION="1.0.5"
+VERSION="v2.1.0"
 #SERVICE_ACCOUNT="srvArcherNBS"
-STORAGE_MOUNT="/mnt/agtcnbs"
-PROJECTS_DIR="/mnt/agtcnbs/CF/Runs"
-WRONG_DIR="/mnt/agtcnbs/CF"
-WATCHED_FOLDER="/watched/robert.sicko@health.ny.gov/CFTR"
+STORAGE_MOUNT="/mnt/auto/agtcnbs"
+PROJECTS_DIR="/mnt/auto/agtcnbs/CF/Runs"
+WRONG_DIR="/mnt/auto/agtcnbs/CF"
+WATCHED_FOLDER="/var/www/analysis/watched/robert.sicko@health.ny.gov/CFTR_2nd_Tier"
 DATESTAMP="$(date "+%Y-%m-%d")"
 #TIMESTAMP="$(date "+%Y-%m-%d %H:%M:%S")"
-LOG_LOCATION="/mnt/agtcnbs/logs"
-LOG="${LOG_LOCATION}/${DATESTAMP}_archer_process_miseq_run.log"
+LOG_LOCATION="/mnt/auto/agtcnbs/logs"
+LOG="${LOG_LOCATION}/${DATESTAMP}_archer_process_miseq_run.${VERSION}.log"
+#WATCHED_FOLDER_mail="/var/www/analysis/watched/nys_nbs/mail"
+
 #######################################
 
 #######################################
@@ -54,9 +75,10 @@ function log_step () {
   local step_status="$2"
   local msg="$3"
   echo "[$time_stamp]"$'\t'"$step_name"$'\t'"[$step_status]"$'\t'"$msg"
-  if [[ "$step_status" = "ERROR" ]] || [[ "$step_status" = "WARNING" ]]; then
-    tail -1 "$LOG" | mailx -s "archer_process_miseq_run warning or error." robert.sicko@health.ny.gov
-  fi
+  #if [[ "$step_status" = "ERROR" ]] || [[ "$step_status" = "WARNING" ]]; then
+  #  err_message = $(tail -1 "$LOG")
+  #  echo "${err_message}" > "${WATCHED_FOLDER_mail}/warning_or_error${job_id}.txt"
+  #fi
 }
 
 #######################################
@@ -100,17 +122,21 @@ function run_ready_demultiplex () {
   elif [[ -f "${proj}/demultiplex.done" ]]; then
       log_step "run_ready_demultiplex" INFO "${proj} already basecalled"
       false
+###############################################################################
+###############################################################################
+###TO UNCOMMENT ONCE SWITCHED##################################################
   elif [[ -f "${proj}/demultiplex.started" ]]; then
       log_step "run_ready_demultiplex" WARNING "${proj} already had a demultiplex.started. Attempting again."
       true
   #we've got a project dir, it doesn't have a demultiplex.done file, let's make sure it is finished copying from the miseq
   #size hasn't changed in 5 minutes. indicating copying is done
-  else
-      log_step "run_ready_demultiplex" INFO "${proj} has an RTAComplete. "
+   else
+      log_step "run_ready_demultiplex" INFO "${proj} has an RTAComplete."
       local old_size=0
       local new_size=0
       while true; do
-          new_size=$(du -sb "$proj" | cut -f1)
+          #new_size=$(du -sb "$proj" | cut -f1) ##doesn't stay the same on the new server
+          new_size=$(ls -la --block-size=1 "$proj" | head -1 | cut -d " " -f2)
           if [[ "$old_size" -eq "$new_size" ]]; then
               log_step "run_ready_demultiplex" INFO "${proj} looks finished. Size = ${new_size}"
               break
@@ -128,6 +154,7 @@ function run_ready_demultiplex () {
       true
   fi
 }
+
 
 
 #######################################
@@ -149,14 +176,20 @@ function run_ready_analyze () {
   elif [[ ! -f "${proj}/RTAComplete.txt" ]]; then
       log_step "run_ready_analyze" INFO "${proj} doesn't have RTAComplete.txt"
       false
-  #archer.done present? it's already been copied to the watch folder if so
+  #archerv7.done present? it's already been copied to the watch folder if so
   #kick out false if it has already been copied and rename the folder if it is older than 24 hours
-  elif [[ -f "${proj}/archer.done" ]]; then
+  elif [[ -f "${proj}/archerv7.done" ]]; then
       log_step "run_ready_analyze" INFO "${proj} already copied to Archer watch folder"
+###############################################################################
+###############################################################################
+###TO UNCOMMENT ONCE SWITCHED##################################################
+#not going to rename run folder on v7 server until we make the switch
+#already renamed by old server for now.
+#uncomment these lines when we change over
       MAXAGE=$(bc <<< '7*24*60*60') # seconds in 7 days
-      MINAGE=$(bc <<< '4*24*60*60') # seconds in 4 days
+      MINAGE=$(bc <<< '3*24*60*60') # seconds in 3 days
       # file age in seconds = current_time - file_modification_time.
-      FILEAGE=$(($(date +%s) - $(stat -c '%Y' "${proj}/archer.done")))
+      FILEAGE=$(($(date +%s) - $(stat -c '%Y' "${proj}/archerv7.done")))
       if [ "$FILEAGE" -gt "$MINAGE" ] && [ "$FILEAGE" -lt "$MAXAGE" ]; then
         archer_name=""
         find_project_name "$proj"
@@ -168,28 +201,52 @@ function run_ready_analyze () {
           archer_project_name="${archer_project_name/%\/}"
           if [[ "$archer_project_name" =~ ^[0-9][0-9][0-9][0-9] ]] ; then #folder already has archer-YYYY-DDD
             log_step "run_ready_analyze" INFO "Didn't rename ${proj}. looks like it already has YYYY-DDD."
-          else
-            log_step "run_ready_analyze" INFO "Renamed ${proj} with YYYY-DDD."
-            mv -n "$proj" "${proj}-Archer-${archer_name}"
+          else 
+            new_dir="${proj}-Archer-${archer_name}"
+            if [[ ! -d $new_dir ]]; then
+              log_step "run_ready_analyze" INFO "Renamed ${proj} with YYYY-DDD."
+              sudo /bin/mv -n -- "$proj" "$new_dir"
+            fi
           fi
         fi
       fi
       false
   else  #we've got a complete MiSeq run, that hasn't been copied to Archer, let's get to work
       #fastqs present?
-      fastqs=$(find "${project}/BaseCalls" -type f -name "*.fastq.gz")
+      archer_name=""
+      find_project_name "$proj"
+      new_dir=""
+      if [[ "$archer_name" == "done_already" ]]; then
+        log_step "run_ready_analyze" INFO "Didn't rename ${proj}. looks like it already has YYYY-DDD."
+        new_dir="$proj"
+      else
+        archer_proj_lc=$(echo "$proj" | tr '[:upper:]' '[:lower:]')
+        archer_project_name="${archer_proj_lc/#*archer-/}"
+        archer_project_name="${archer_project_name/%\/}"
+        if [[ "$archer_project_name" =~ ^[0-9][0-9][0-9][0-9] ]] ; then #folder already has archer-YYYY-DDD
+          log_step "run_ready_analyze" INFO "Didn't rename ${proj}. looks like it already has YYYY-DDD."
+          new_dir="$proj"
+        else 
+          new_dir="${proj}-Archer-${archer_name}"
+          if [[ ! -d $new_dir ]]; then
+            log_step "run_ready_analyze" INFO "Renamed ${proj} with YYYY-DDD."
+            sudo /bin/mv -n -- "$proj" "$new_dir"
+          fi
+        fi
+      fi
+      fastqs=$(find "${new_dir}/BaseCalls" -type f -name "*.fastq.gz")
       if [[ -n "$fastqs" ]]; then
         #we found fastqs
-        if [[ -f "${proj}/archer.pending" ]]; then
-          log_step "run_ready_analyze" WARNING "Possible issue. $proj has an archer.pending file, but no archer.done file"
+        if [[ -f "${new_dir}/archerv7.pending" ]]; then
+          log_step "run_ready_analyze" WARNING "Possible issue. $new_dir has an archerv7.pending file, but no archerv7.done file"
         fi
-        log_step "run_ready_analyze" FINISHED "${proj} is ready to analyze"
+        log_step "run_ready_analyze" FINISHED "${new_dir} is ready to analyze"
         true
       else
         #we didn't find any fastqs
         #log an error, this shouldn't happen since we are in a project with 
-        #an RTAComplete.txt and no archer.done
-        log_step "run_ready_analyze" ERROR "Couldn't find any fastqs for ${proj}"
+        #an RTAComplete.txt and no archerv7.done
+        log_step "run_ready_analyze" ERROR "Couldn't find any fastqs for ${new_dir}"
         false
       fi
   fi
@@ -248,47 +305,6 @@ function find_project_name (){
   fi
 }
 
-#######################################
-#FUNCTION link_fastqs
-# Soft links demultiplexed fastqs to the Archer watched folder
-# Globals:
-# Arguments:
-#   project - a MiSeq run folder
-# TODO:
-#   accept multiple projects in the same sample sheet. create multiple folders based on the project in the sample sheet and link there.
-#######################################
-function link_fastqs () {
-  #we know we have at least one fastq since this function was called.
-  #so, extract project name
-  local proj="$1"
-  #attempt to get project name from samplesheet
-  #local sample_sheet="${project}/SampleSheet.csv"
-  project_name=""
-  if find_project_name "$proj" ; then
-    mkdir -p "${WATCHED_FOLDER}/${project_name}"
-    chmod g+w "${WATCHED_FOLDER}/${project_name}"
-    for fastq in $fastqs ; do
-      #don't copy blanks
-      #don't copy undetermined
-      #don't copy RES
-      fastq_name="${fastq##*/}"
-      # set nocasematch option
-      shopt -s nocasematch
-      if [[ ${fastq_name} != *"blank"* && ${fastq_name} != *"undetermined"* && ${fastq_name} != *"RES"* ]]; then 
-        ln -s "$fastq" "${WATCHED_FOLDER}/${project_name}/${fastq_name}"
-        chmod g+w "${WATCHED_FOLDER}/${project_name}/${fastq_name}"
-      fi
-      # unset nocasematch option
-      shopt -u nocasematch
-    done
-    touch "${WATCHED_FOLDER}/${project_name}.completed"
-    true
-  else
-    log_step "link_fastqs" ERROR "Unable to find project name. Fastqs not linked"
-    false
-  fi
-  
-}
 
 #######################################
 #FUNCTION main
@@ -313,16 +329,16 @@ function main (){
     #first check for projects in the wrong project directory
     #\\prdnbsfs.health1.hcom.health.state.ny.us\agtcnbs\CF instead of \\prdnbsfs.health1.hcom.health.state.ny.us\agtcnbs\CF\Runs
     for project in "${WRONG_DIR}"/* ; do
-      if [[ -f "${project}/rsync.started" ]]; then
-            log_step "rsync" INFO "${project} already started syncing"
-      elif [[ -f "${project}/rsync.done" ]]; then
+      if [[ -f "${project}/rsyncv7.done" ]]; then
             log_step "rsync" INFO "${proj} already copied"
+      elif [[ -f "${project}/rsyncv7.started" ]]; then
+            log_step "rsync" INFO "${project} already started syncing"
       elif run_ready_demultiplex "$project" ; then
           log_step "rsync" STARTED "rsyncing $project to correct run folder"
-          touch "${project}/rsync.started"  #output a pending file
+          touch "${project}/rsyncv7.started"  #output a pending file
           base=$(basename "$project")
           rsync -a "${project}/" "${PROJECTS_DIR}/$base"
-          touch "${project}/rsync.done"  #output a finished file
+          touch "${project}/rsyncv7.done"  #output a finished file
           log_step "rsync" FINISHED "copied $project to correct run folder"
           END_TIME=$(date +%s)
           DIFF=$(( END_TIME - START_TIME ))
@@ -356,14 +372,28 @@ function main (){
           fi
       fi
       fastqs=""
+      new_dir=""
       if run_ready_analyze "$project" ; then
-          touch "${project}/archer.pending" #output a file so we know we started linking fastqs
-          log_step "link_fastqs" STARTED "Started linking fastqs for $project to the Archer watch folder"
-          if link_fastqs "$project" ; then
-            touch "${project}/archer.done"
-            log_step "link_fastqs" FINISHED "Finished linking fastqs for $project to the Archer watch folder"
+          touch "${new_dir}/archerv7.pending" #output a file so we know we started uploading fastqs
+          log_step "submit_job" STARTED "Started uploading fastqs for $new_dir to the Archer Analysis server"
+      ##############################################################################
+      #REST API queue project here
+      #python /opt/nys_nbs/nys_cftr_coverage_v1.0.0.py -s $sample -i ${temp_mosdepth_out}.per-base.bed.gz -t $target_bed -o $hook_output_dir/${job_id}_coverage_report.txt
+      ##############################################################################
+          project_name=""
+          if find_project_name ${new_dir} ; then
+            basecall_dir="${new_dir}/BaseCalls"
+            job_submitted=`python /opt/nys_nbs/py_v7_jobSubmit.py -d ${basecall_dir} -n ${project_name}`
+            if [ "$job_submitted" == *"ERROR"* ] ; then
+              #one or more samples failed to upload
+              log_step "submit_job" ERROR "Could not upload fastqs for $project. The error was $job_submitted"
+            else
+              touch "${new_dir}/archerv7.done"
+              log_step "submit_job" FINISHED "Finished uploading fastqs for $project to the Archer server"
+              log_step "submit_job" DEBUG "$job_submitted"
+            fi
           else
-            log_step "link_fastqs" ERROR "Could not link fastqs for $project"
+            log_step "submit_job" ERROR "Unable to find project name. Fastqs not uploaded"
           fi
       fi
     done
