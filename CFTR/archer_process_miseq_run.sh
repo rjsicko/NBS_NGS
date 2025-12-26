@@ -30,6 +30,7 @@
 #             v2.0.0        - uncommented lines since we switch (rename run folder)
 #                           - removed alpha (production now)
 #             v2.1.0        - fixed bug in rename run folder. uncomment lines.
+#             v2.1.1        - Added skips for renamed complete/original reprocess, demultiplex.failed handling, pending-resolved check
 # TODO:
 #			- Prevent spamming errors.
 #					- Add a file to a run that indicates an error message has been sent. If file present - no email, just log "error already sent"
@@ -44,7 +45,7 @@
 #     the samplesheet had "Archer 2023-291" as Experiment Name and the code left project_name=291 for some reason.
 #######################################
 #GLOBAL DEFINITIONS
-VERSION="v2.1.0"
+VERSION="v2.1.1"  # Added skips for renamed complete/original reprocess, demultiplex.failed handling, pending-resolved check
 #SERVICE_ACCOUNT="srvArcherNBS"
 STORAGE_MOUNT="/mnt/auto/agtcnbs"
 PROJECTS_DIR="/mnt/auto/agtcnbs/CF/Runs"
@@ -121,6 +122,9 @@ function run_ready_demultiplex () {
   #demultiplex.done there? hasn't already been processed.
   elif [[ -f "${proj}/demultiplex.done" ]]; then
       log_step "run_ready_demultiplex" INFO "${proj} already basecalled"
+      false
+  elif [[ -f "${proj}/demultiplex.failed" ]]; then
+      log_step "run_ready_demultiplex" INFO "${proj} demultiplex failed previously. Skipping."
       false
 ###############################################################################
 ###############################################################################
@@ -237,8 +241,10 @@ function run_ready_analyze () {
       fastqs=$(find "${new_dir}/BaseCalls" -type f -name "*.fastq.gz")
       if [[ -n "$fastqs" ]]; then
         #we found fastqs
-        if [[ -f "${new_dir}/archerv7.pending" ]]; then
-          log_step "run_ready_analyze" WARNING "Possible issue. $new_dir has an archerv7.pending file, but no archerv7.done file"
+        if [[ -f "${new_dir}/archerv7.pending" && ! -f "${new_dir}/archerv7.done" ]]; then
+          log_step "run_ready_analyze" WARNING "${new_dir} has unresolved archerv7.pending. Skipping submission."
+          false
+          return
         fi
         log_step "run_ready_analyze" FINISHED "${new_dir} is ready to analyze"
         true
@@ -352,6 +358,18 @@ function main (){
     done
     #now go through projects in correct directory
     for project in "${PROJECTS_DIR}"/* ; do
+      base_name=$(basename "$project")
+      skip=false
+      for renamed in "${PROJECTS_DIR}/${base_name}-Archer-"*; do
+        if [[ -f "$renamed/archerv7.done" ]]; then
+          log_step "main" INFO "${project} skipped: renamed complete version $renamed exists."
+          skip=true
+          break
+        fi
+      done
+      if [[ "$skip" == true ]]; then
+        continue
+      fi
       if run_ready_demultiplex "$project" ; then
           log_step "bcl2fastq" STARTED "demultiplexing $project with command: nohup /usr/local/bin/bcl2fastq --runfolder-dir $project --output-dir ${project}/BaseCalls"
           touch "${project}/demultiplex.started"  #output a pending file
@@ -365,6 +383,7 @@ function main (){
               touch "${project}/demultiplex.done" #output a finished file
             else
               log_step "bcl2fastq" ERROR "Unknown error with bcl2fastq. Check logfile"
+              touch "${project}/demultiplex.failed"
             fi
           else
             touch "${project}/demultiplex.done" #output a finished file
